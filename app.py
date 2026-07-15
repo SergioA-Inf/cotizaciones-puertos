@@ -1,7 +1,10 @@
 """
 App de Cotizaciones - Terminales de Cruceros (Panamá y Colón)
 =============================================================
-PASO 5: login + panel del Jefe + panel de la Junta (firma y aprobación).
+PASO 6: aprobación MÚLTIPLE para la Junta.
+
+La Junta ahora ve un resumen + una tabla con casillas, selecciona las
+cotizaciones que quiere y las firma todas de una sola vez.
 """
 
 import io
@@ -21,7 +24,7 @@ st.set_page_config(page_title="Cotizaciones Puertos", page_icon="📋", layout="
 
 
 # ---------------------------------------------------------------------------
-# 1. Credenciales desde los Secrets
+# 1. Credenciales
 # ---------------------------------------------------------------------------
 def cargar_credenciales():
     credenciales = {"usernames": {}}
@@ -114,7 +117,7 @@ def panel_jefe(usuario: str):
 
 
 # ---------------------------------------------------------------------------
-# 3. Registro de firma (solo la propia)
+# 3. Registro de firma
 # ---------------------------------------------------------------------------
 def registrar_firma(usuario: str, nombre: str, ya_tiene: bool):
     titulo = "✍️ Cambiar mi firma" if ya_tiene else "✍️ Registrar mi firma"
@@ -150,15 +153,12 @@ def registrar_firma(usuario: str, nombre: str, ya_tiene: bool):
             )
             if lienzo.image_data is not None:
                 arreglo = np.array(lienzo.image_data, dtype=np.uint8)
-                # Si el canal de transparencia está todo en cero, no dibujó nada.
                 if arreglo[:, :, 3].max() > 0:
                     img = Image.fromarray(arreglo, "RGBA")
                     buf = io.BytesIO()
                     img.save(buf, format="PNG")
                     imagen_final = buf.getvalue()
-
             st.caption("Usa la papelera 🗑 debajo del recuadro para borrar y repetir.")
-
         else:
             subida = st.file_uploader(
                 "Foto de tu firma (fondo blanco, marcador negro)",
@@ -184,7 +184,50 @@ def registrar_firma(usuario: str, nombre: str, ya_tiene: bool):
 
 
 # ---------------------------------------------------------------------------
-# 4. Panel de la Junta
+# 4. Procesos por lote (firmar / rechazar varias)
+# ---------------------------------------------------------------------------
+def procesar_aprobacion(ids, registro, usuario):
+    """Firma y aprueba una lista de cotizaciones, una por una."""
+    barra = st.progress(0.0, text="Preparando...")
+    firma = ds.descargar_firma(registro["ruta_firma"])
+
+    ok, errores = [], []
+
+    for i, id_cot in enumerate(ids, start=1):
+        cot = ds.obtener_cotizacion(id_cot)
+        etiqueta = cot["numero_odc"] if cot else id_cot
+        barra.progress(i / len(ids), text=f"Firmando {etiqueta} ({i} de {len(ids)})...")
+
+        try:
+            original = ds.descargar_pdf(cot["pdf_original_url"])
+            firmado = pdf_utils.generar_pdf_firmado(
+                original, cot, firma, registro["nombre_completo"]
+            )
+            url = ds.subir_pdf_firmado(firmado, cot["numero_odc"])
+            ds.aprobar_cotizacion(cot["id"], usuario, url)
+            ok.append(etiqueta)
+        except Exception as e:
+            errores.append((etiqueta, str(e)))
+
+    barra.empty()
+    return ok, errores
+
+
+def procesar_rechazo(ids, usuario, motivo):
+    ok, errores = [], []
+    for id_cot in ids:
+        cot = ds.obtener_cotizacion(id_cot)
+        etiqueta = cot["numero_odc"] if cot else id_cot
+        try:
+            ds.rechazar_cotizacion(id_cot, usuario, motivo)
+            ok.append(etiqueta)
+        except Exception as e:
+            errores.append((etiqueta, str(e)))
+    return ok, errores
+
+
+# ---------------------------------------------------------------------------
+# 5. Panel de la Junta
 # ---------------------------------------------------------------------------
 def panel_junta(usuario: str, nombre: str):
     st.subheader("🏛️ Panel de la Junta Directiva")
@@ -198,74 +241,149 @@ def panel_junta(usuario: str, nombre: str):
 
     st.divider()
 
-    sede_filtro = st.radio(
-        "Sede", ["Todas"] + ds.SEDES, horizontal=True, key="sede_junta"
-    )
+    # --- Si hay una acción esperando confirmación, se atiende primero -----
+    if st.session_state.get("confirmar_aprobar"):
+        pantalla_confirmacion(registro, usuario)
+        return
+
+    # --- Filtro por sede --------------------------------------------------
+    sede_filtro = st.radio("Sede", ["Todas"] + ds.SEDES, horizontal=True, key="sede_junta")
     sede = None if sede_filtro == "Todas" else sede_filtro
 
     pendientes = ds.listar_cotizaciones(sede=sede, estatus="por_aprobar")
 
-    st.markdown(f"### Pendientes de aprobación ({len(pendientes)})")
+    # --- Resumen ----------------------------------------------------------
+    total_monto = sum(float(c["monto"]) for c in pendientes)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Pendientes de aprobación", len(pendientes))
+    m2.metric("Monto total por aprobar", f"US$ {total_monto:,.2f}")
+    m3.metric("Sede", sede_filtro)
 
     if not pendientes:
         st.success("No hay cotizaciones pendientes. 🎉")
         return
 
-    for cot in pendientes:
-        titulo = (
-            f"{cot['numero_odc']} · {cot['proveedor']} · "
-            f"US$ {float(cot['monto']):,.2f} · {cot['sede']}"
-        )
-        with st.expander(titulo):
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.write(f"**Área:** {cot['area']}")
-                st.write(f"**Fecha cotización:** {cot.get('fecha_cotizacion', '—')}")
-                st.write(f"**Descripción:** {cot.get('descripcion', '—')}")
-                if cot.get("observaciones"):
-                    st.write(f"**Observaciones:** {cot['observaciones']}")
-                st.write(f"**Subido por:** {cot.get('subido_por', '—')}")
-            with c2:
-                st.link_button("📄 Ver PDF", cot["pdf_original_url"])
+    st.markdown("#### Selecciona las cotizaciones a firmar")
+    st.caption(
+        "Marca la casilla de cada cotización. Puedes abrir el PDF antes de decidir. "
+        "Al final, un solo botón las firma todas."
+    )
 
-            st.divider()
+    # --- Tabla con casillas ----------------------------------------------
+    df = pd.DataFrame(pendientes)
+    df["Aprobar"] = False
 
-            b1, b2 = st.columns(2)
+    vista = df[[
+        "Aprobar", "numero_odc", "fecha_cotizacion", "sede", "area",
+        "proveedor", "descripcion", "monto", "pdf_original_url", "id",
+    ]].rename(columns={
+        "numero_odc": "N° OdC",
+        "fecha_cotizacion": "Fecha",
+        "sede": "Sede",
+        "area": "Área",
+        "proveedor": "Proveedor",
+        "descripcion": "Descripción",
+        "monto": "Monto (USD)",
+        "pdf_original_url": "PDF",
+    })
 
-            with b1:
-                if st.button("✅ Aprobar y firmar", key=f"ap_{cot['id']}", type="primary"):
-                    try:
-                        with st.spinner("Firmando el documento..."):
-                            original = ds.descargar_pdf(cot["pdf_original_url"])
-                            firma = ds.descargar_firma(registro["ruta_firma"])
-                            firmado = pdf_utils.generar_pdf_firmado(
-                                original, cot, firma, registro["nombre_completo"]
-                            )
-                            url = ds.subir_pdf_firmado(firmado, cot["numero_odc"])
-                            ds.aprobar_cotizacion(cot["id"], usuario, url)
-                        st.success(f"✅ {cot['numero_odc']} aprobada y firmada.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error("No se pudo aprobar.")
-                        st.caption(f"Detalle técnico: {e}")
+    editada = st.data_editor(
+        vista,
+        hide_index=True,
+        use_container_width=True,
+        column_order=[
+            "Aprobar", "N° OdC", "Fecha", "Sede", "Área",
+            "Proveedor", "Descripción", "Monto (USD)", "PDF",
+        ],
+        column_config={
+            "Aprobar": st.column_config.CheckboxColumn("☑", width="small"),
+            "Monto (USD)": st.column_config.NumberColumn(format="$ %.2f"),
+            "PDF": st.column_config.LinkColumn(display_text="Abrir"),
+            "Descripción": st.column_config.TextColumn(width="medium"),
+        },
+        disabled=[
+            "N° OdC", "Fecha", "Sede", "Área",
+            "Proveedor", "Descripción", "Monto (USD)", "PDF",
+        ],
+        key="editor_junta",
+    )
 
-            with b2:
-                motivo = st.text_input("Motivo del rechazo", key=f"mot_{cot['id']}")
-                if st.button("❌ Rechazar", key=f"re_{cot['id']}"):
-                    if not motivo.strip():
-                        st.error("Escribe el motivo del rechazo.")
-                    else:
-                        try:
-                            ds.rechazar_cotizacion(cot["id"], usuario, motivo.strip())
-                            st.warning(f"{cot['numero_odc']} rechazada.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error("No se pudo rechazar.")
-                            st.caption(f"Detalle técnico: {e}")
+    seleccionadas = editada[editada["Aprobar"] == True]  # noqa: E712
+    ids = seleccionadas["id"].tolist()
+    monto_sel = float(seleccionadas["Monto (USD)"].sum()) if ids else 0.0
+
+    st.markdown(
+        f"**Seleccionadas: {len(ids)}**  ·  Monto: **US$ {monto_sel:,.2f}**"
+    )
+
+    c1, c2 = st.columns([1, 2])
+
+    with c1:
+        if st.button(
+            f"✅ Firmar y aprobar ({len(ids)})",
+            type="primary",
+            disabled=not ids,
+            use_container_width=True,
+        ):
+            st.session_state["confirmar_aprobar"] = ids
+            st.session_state["confirmar_monto"] = monto_sel
+            st.rerun()
+
+    with c2:
+        with st.expander("❌ Rechazar las seleccionadas"):
+            motivo = st.text_input("Motivo del rechazo (se aplica a todas)")
+            if st.button("Rechazar", disabled=not ids):
+                if not motivo.strip():
+                    st.error("Escribe el motivo del rechazo.")
+                else:
+                    ok, errores = procesar_rechazo(ids, usuario, motivo.strip())
+                    if ok:
+                        st.warning(f"Rechazadas: {', '.join(ok)}")
+                    for etiqueta, err in errores:
+                        st.error(f"{etiqueta}: {err}")
+                    st.rerun()
+
+
+def pantalla_confirmacion(registro, usuario):
+    """Pide confirmación antes de firmar en lote (acción difícil de deshacer)."""
+    ids = st.session_state["confirmar_aprobar"]
+    monto = st.session_state.get("confirmar_monto", 0.0)
+
+    st.warning(
+        f"### ⚠️ Confirmar firma\n\n"
+        f"Vas a **aprobar y firmar {len(ids)} cotización(es)** "
+        f"por un total de **US$ {monto:,.2f}**.\n\n"
+        f"Cada una recibirá tu firma y el acta de aprobación. "
+        f"Esta acción no se deshace desde la app."
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        if st.button("✅ Sí, firmar todas", type="primary", use_container_width=True):
+            ok, errores = procesar_aprobacion(ids, registro, usuario)
+            st.session_state.pop("confirmar_aprobar", None)
+            st.session_state.pop("confirmar_monto", None)
+
+            if ok:
+                st.success(f"✅ Firmadas y aprobadas: {', '.join(ok)}")
+            for etiqueta, err in errores:
+                st.error(f"No se pudo firmar {etiqueta}.")
+                st.caption(f"Detalle técnico: {err}")
+
+            if not errores:
+                st.balloons()
+            st.button("Volver al panel")
+
+    with c2:
+        if st.button("Cancelar", use_container_width=True):
+            st.session_state.pop("confirmar_aprobar", None)
+            st.session_state.pop("confirmar_monto", None)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
-# 5. Tabla general
+# 6. Tabla general
 # ---------------------------------------------------------------------------
 def tabla_cotizaciones(usuario: str, ver_todo: bool):
     st.subheader("📄 Todas las cotizaciones" if ver_todo else "📄 Mis cotizaciones")
@@ -309,7 +427,7 @@ def tabla_cotizaciones(usuario: str, ver_todo: bool):
 
 
 # ---------------------------------------------------------------------------
-# 6. Pantalla principal
+# 7. Pantalla principal
 # ---------------------------------------------------------------------------
 st.title("📋 Cotizaciones · Terminales de Cruceros")
 
@@ -342,11 +460,9 @@ elif estado:
         panel_junta(usuario, nombre)
         st.divider()
         tabla_cotizaciones(usuario, ver_todo=True)
-
     elif es_admin or "jefe" in roles:
         panel_jefe(usuario)
         st.divider()
         tabla_cotizaciones(usuario, ver_todo=es_admin)
-
     else:
         st.warning("Tu usuario no tiene un rol asignado. Avisa al administrador.")
