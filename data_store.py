@@ -186,10 +186,15 @@ def subir_pdf(archivo) -> str:
 
 
 def descargar_pdf(url: str) -> bytes:
+    """Baja cualquier archivo del bucket público a partir de su URL."""
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
     return cliente.storage.from_(BUCKET).download(_ruta_desde_url(url))
+
+
+# Mismo comportamiento, nombre más claro cuando no es un PDF
+descargar_archivo = descargar_pdf
 
 
 def subir_pdf_firmado(contenido: bytes, numero_odc: str) -> str:
@@ -201,6 +206,25 @@ def subir_pdf_firmado(contenido: bytes, numero_odc: str) -> str:
         nombre, contenido, {"content-type": "application/pdf"}
     )
     return cliente.storage.from_(BUCKET).get_public_url(nombre)
+
+
+def subir_expediente(contenido: bytes, numero_odc: str) -> str:
+    """Sube el PDF completo de la orden (cotización + acta + respaldos)."""
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+    nombre = f"expedientes/{_nombre_seguro(numero_odc)}_{uuid.uuid4().hex[:8]}.pdf"
+    cliente.storage.from_(BUCKET).upload(
+        nombre, contenido, {"content-type": "application/pdf"}
+    )
+    return cliente.storage.from_(BUCKET).get_public_url(nombre)
+
+
+def guardar_expediente(id_cot: str, url: str) -> None:
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+    cliente.table(TABLA).update({"pdf_expediente_url": url}).eq("id", id_cot).execute()
 
 
 # ---------------------------------------------------------------------------

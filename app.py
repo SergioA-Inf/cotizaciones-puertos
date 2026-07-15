@@ -152,7 +152,7 @@ def mostrar_tabla(df, respaldos=None):
         return
 
     df = df.copy()
-    for col in ["pdf_firmado_url", "observaciones", "motivo_rechazo"]:
+    for col in ["pdf_firmado_url", "pdf_expediente_url", "observaciones", "motivo_rechazo"]:
         if col not in df.columns:
             df[col] = None
 
@@ -165,6 +165,7 @@ def mostrar_tabla(df, respaldos=None):
         "area": "Área", "proveedor": "Proveedor", "monto": "Monto (USD)",
         "Estatus": "Estatus", "pdf_original_url": "PDF original",
         "pdf_firmado_url": "PDF firmado",
+        "pdf_expediente_url": "Expediente",
     }
     if respaldos is not None:
         columnas["Respaldos"] = "Respaldos"
@@ -177,6 +178,9 @@ def mostrar_tabla(df, respaldos=None):
             "Monto (USD)": st.column_config.NumberColumn(format="$ %.2f"),
             "PDF original": st.column_config.LinkColumn(display_text="Abrir"),
             "PDF firmado": st.column_config.LinkColumn(display_text="Descargar"),
+            "Expediente": st.column_config.LinkColumn(
+                "Expediente", display_text="📎 Completo"
+            ),
         },
     )
     total = float(df["monto"].sum())
@@ -425,23 +429,42 @@ def panel_ejecutar(usuario: str, ver_todo: bool):
     adjuntos = st.file_uploader(
         "Respaldos: reporte del proveedor, fotos, actas de entrega",
         accept_multiple_files=True,
-        type=["pdf", "png", "jpg", "jpeg", "doc", "docx", "xls", "xlsx"],
+        type=["pdf", "png", "jpg", "jpeg"],
         key="adj_ejec",
+        help="Solo PDF y fotos. Si tienes un Word o Excel, guárdalo como PDF antes "
+             "de subirlo para que quede dentro del expediente.",
     )
 
     if st.button("Marcar como ejecutada", type="primary"):
         try:
+            # 1. Guardar cada respaldo (y conservar el contenido en memoria,
+            #    así no hay que volver a bajarlo para armar el expediente)
+            archivos = []
             if adjuntos:
                 barra = st.progress(0.0, text="Subiendo respaldos...")
                 for i, archivo in enumerate(adjuntos, start=1):
                     ds.subir_respaldo(cot["id"], archivo, usuario)
+                    archivos.append({"nombre": archivo.name,
+                                     "contenido": archivo.getvalue()})
                     barra.progress(i / len(adjuntos), text=f"Subiendo {archivo.name}...")
                 barra.empty()
 
+            # 2. Cerrar la orden
             ds.marcar_ejecutado(cot["id"], usuario, nota.strip() or None)
+
+            # 3. Armar el expediente: cotización + acta firmada + respaldos
+            with st.spinner("Armando el expediente..."):
+                datos = {**cot,
+                         "ejecutado_por": usuario,
+                         "nota_ejecucion": nota.strip() or None}
+                firmado = ds.descargar_archivo(cot["pdf_firmado_url"])
+                expediente = pdf_utils.generar_expediente(firmado, datos, archivos)
+                url = ds.subir_expediente(expediente, cot["numero_odc"])
+                ds.guardar_expediente(cot["id"], url)
+
             st.success(
-                f"✅ {cot['numero_odc']} marcada como ejecutada"
-                + (f" con {len(adjuntos)} respaldo(s)." if adjuntos else ".")
+                f"✅ {cot['numero_odc']} ejecutada. Expediente generado"
+                + (f" con {len(archivos)} respaldo(s)." if archivos else ".")
             )
             st.rerun()
         except Exception as e:
@@ -697,8 +720,8 @@ def panel_historial(usuario=None, clave="hist"):
 def panel_administrativo():
     st.subheader("💳 Órdenes firmadas")
     st.caption(
-        "Órdenes aprobadas por la Junta. Descarga el PDF firmado y los respaldos "
-        "del trabajo para armar el proceso de pago."
+        "Órdenes aprobadas por la Junta. Descarga el **Expediente** para tener en un "
+        "solo PDF la cotización, el acta firmada y los respaldos del trabajo."
     )
 
     filas = ds.listar_cotizaciones(estatus_en=["aprobado_firmado", "ejecutado"])
