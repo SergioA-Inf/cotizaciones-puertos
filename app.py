@@ -1,10 +1,12 @@
 """
 App de Cotizaciones - Terminales de Cruceros (Panamá y Colón)
 =============================================================
-PASO 6: aprobación MÚLTIPLE para la Junta.
+PASO 7: los usuarios ahora viven en Supabase.
 
-La Junta ahora ve un resumen + una tabla con casillas, selecciona las
-cotizaciones que quiere y las firma todas de una sola vez.
+Novedades:
+  - Login contra la tabla `usuarios` (ya no contra los Secrets).
+  - Cada quien puede cambiar su propia contraseña.
+  - El administrador da de alta jefes desde la app, sin tocar código.
 """
 
 import io
@@ -24,23 +26,19 @@ st.set_page_config(page_title="Cotizaciones Puertos", page_icon="📋", layout="
 
 
 # ---------------------------------------------------------------------------
-# 1. Credenciales
+# 1. Login (credenciales desde Supabase)
 # ---------------------------------------------------------------------------
-def cargar_credenciales():
-    credenciales = {"usernames": {}}
-    for usuario, datos in st.secrets["credentials"].items():
-        credenciales["usernames"][usuario] = {
-            "first_name": datos.get("first_name", ""),
-            "last_name": datos.get("last_name", ""),
-            "email": datos.get("email", ""),
-            "password": datos["password"],
-            "roles": list(datos.get("roles", [])),
-        }
-    return credenciales
+credenciales = ds.cargar_usuarios_para_login()
 
+if not credenciales["usernames"]:
+    st.error(
+        "No se pudieron cargar los usuarios desde la base de datos. "
+        "Revisa la conexión con Supabase."
+    )
+    st.stop()
 
 authenticator = stauth.Authenticate(
-    cargar_credenciales(),
+    credenciales,
     st.secrets["auth_cookie"]["name"],
     st.secrets["auth_cookie"]["key"],
     st.secrets["auth_cookie"]["expiry_days"],
@@ -48,7 +46,127 @@ authenticator = stauth.Authenticate(
 
 
 # ---------------------------------------------------------------------------
-# 2. Panel del Jefe
+# 2. Cambiar mi contraseña
+# ---------------------------------------------------------------------------
+def cambiar_mi_password(usuario: str):
+    with st.expander("🔑 Cambiar mi contraseña"):
+        actual = st.text_input("Contraseña actual", type="password", key="pw_actual")
+        nueva = st.text_input("Contraseña nueva", type="password", key="pw_nueva")
+        repetir = st.text_input("Repite la nueva", type="password", key="pw_rep")
+
+        if st.button("Guardar contraseña nueva", key="btn_pw"):
+            registro = ds.obtener_usuario(usuario)
+            if registro is None:
+                st.error("No se encontró tu usuario.")
+                return
+            if not ds.password_correcta(actual, registro["password_hash"]):
+                st.error("La contraseña actual no es correcta.")
+                return
+            if len(nueva) < 8:
+                st.error("La contraseña nueva debe tener al menos 8 caracteres.")
+                return
+            if nueva != repetir:
+                st.error("Las dos contraseñas nuevas no coinciden.")
+                return
+            try:
+                ds.cambiar_password(usuario, nueva)
+                st.success(
+                    "✅ Contraseña actualizada. Se usará la próxima vez que inicies sesión."
+                )
+            except Exception as e:
+                st.error("No se pudo cambiar la contraseña.")
+                st.caption(f"Detalle técnico: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 3. Administración de usuarios (solo admin)
+# ---------------------------------------------------------------------------
+def panel_usuarios():
+    st.subheader("👥 Usuarios del sistema")
+
+    with st.expander("➕ Crear usuario nuevo"):
+        with st.form("form_usuario", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                nuevo_usuario = st.text_input(
+                    "Usuario *", placeholder="ej: jperez (sin espacios ni mayúsculas)"
+                )
+                nombre = st.text_input("Nombre *")
+                apellido = st.text_input("Apellido")
+            with c2:
+                email = st.text_input("Correo")
+                rol = st.selectbox("Rol *", ds.ROLES, index=0)
+                sede = st.selectbox("Sede (informativo)", ["—"] + ds.SEDES)
+
+            password = st.text_input(
+                "Contraseña temporal *",
+                help="La persona podrá cambiarla al entrar.",
+            )
+            crear = st.form_submit_button("Crear usuario", type="primary")
+
+        if crear:
+            u = nuevo_usuario.strip().lower()
+            if not u or not nombre.strip() or not password:
+                st.error("Usuario, nombre y contraseña temporal son obligatorios.")
+            elif " " in u:
+                st.error("El usuario no puede llevar espacios.")
+            elif len(password) < 8:
+                st.error("La contraseña temporal debe tener al menos 8 caracteres.")
+            elif ds.obtener_usuario(u):
+                st.error(f"El usuario «{u}» ya existe.")
+            else:
+                try:
+                    ds.crear_usuario(
+                        u, nombre.strip(), apellido.strip(), email.strip(),
+                        password, [rol], None if sede == "—" else sede,
+                    )
+                    st.success(f"✅ Usuario «{u}» creado con rol {rol}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error("No se pudo crear el usuario.")
+                    st.caption(f"Detalle técnico: {e}")
+
+    # --- Lista de usuarios -------------------------------------------------
+    usuarios = ds.listar_usuarios()
+    if not usuarios:
+        st.info("No hay usuarios.")
+        return
+
+    df = pd.DataFrame(usuarios)
+    df["Rol"] = df["roles"].apply(lambda r: ", ".join(r or []))
+    vista = df[["usuario", "nombre", "apellido", "email", "Rol", "sede", "activo"]].rename(
+        columns={
+            "usuario": "Usuario", "nombre": "Nombre", "apellido": "Apellido",
+            "email": "Correo", "sede": "Sede", "activo": "Activo",
+        }
+    )
+    st.dataframe(vista, hide_index=True, use_container_width=True)
+
+    # --- Activar / desactivar ---------------------------------------------
+    st.markdown("##### Activar o desactivar acceso")
+    st.caption(
+        "Desactivar impide el ingreso, pero conserva el historial de la persona. "
+        "Es lo correcto cuando alguien deja la empresa."
+    )
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        objetivo = st.selectbox("Usuario", [u["usuario"] for u in usuarios])
+    with c2:
+        registro = next(u for u in usuarios if u["usuario"] == objetivo)
+        nuevo_estado = not registro["activo"]
+        etiqueta = "Activar" if nuevo_estado else "Desactivar"
+        if st.button(f"{etiqueta} «{objetivo}»", use_container_width=True):
+            try:
+                ds.activar_usuario(objetivo, nuevo_estado)
+                st.success(f"Usuario «{objetivo}» {etiqueta.lower()}do.")
+                st.rerun()
+            except Exception as e:
+                st.error("No se pudo cambiar el estado.")
+                st.caption(f"Detalle técnico: {e}")
+
+
+# ---------------------------------------------------------------------------
+# 4. Panel del Jefe
 # ---------------------------------------------------------------------------
 def panel_jefe(usuario: str):
     st.subheader("➕ Nueva cotización")
@@ -117,7 +235,7 @@ def panel_jefe(usuario: str):
 
 
 # ---------------------------------------------------------------------------
-# 3. Registro de firma
+# 5. Registro de firma
 # ---------------------------------------------------------------------------
 def registrar_firma(usuario: str, nombre: str, ya_tiene: bool):
     titulo = "✍️ Cambiar mi firma" if ya_tiene else "✍️ Registrar mi firma"
@@ -184,20 +302,17 @@ def registrar_firma(usuario: str, nombre: str, ya_tiene: bool):
 
 
 # ---------------------------------------------------------------------------
-# 4. Procesos por lote (firmar / rechazar varias)
+# 6. Procesos por lote
 # ---------------------------------------------------------------------------
 def procesar_aprobacion(ids, registro, usuario):
-    """Firma y aprueba una lista de cotizaciones, una por una."""
     barra = st.progress(0.0, text="Preparando...")
     firma = ds.descargar_firma(registro["ruta_firma"])
-
     ok, errores = [], []
 
     for i, id_cot in enumerate(ids, start=1):
         cot = ds.obtener_cotizacion(id_cot)
         etiqueta = cot["numero_odc"] if cot else id_cot
         barra.progress(i / len(ids), text=f"Firmando {etiqueta} ({i} de {len(ids)})...")
-
         try:
             original = ds.descargar_pdf(cot["pdf_original_url"])
             firmado = pdf_utils.generar_pdf_firmado(
@@ -227,7 +342,7 @@ def procesar_rechazo(ids, usuario, motivo):
 
 
 # ---------------------------------------------------------------------------
-# 5. Panel de la Junta
+# 7. Panel de la Junta
 # ---------------------------------------------------------------------------
 def panel_junta(usuario: str, nombre: str):
     st.subheader("🏛️ Panel de la Junta Directiva")
@@ -241,18 +356,15 @@ def panel_junta(usuario: str, nombre: str):
 
     st.divider()
 
-    # --- Si hay una acción esperando confirmación, se atiende primero -----
     if st.session_state.get("confirmar_aprobar"):
         pantalla_confirmacion(registro, usuario)
         return
 
-    # --- Filtro por sede --------------------------------------------------
     sede_filtro = st.radio("Sede", ["Todas"] + ds.SEDES, horizontal=True, key="sede_junta")
     sede = None if sede_filtro == "Todas" else sede_filtro
 
     pendientes = ds.listar_cotizaciones(sede=sede, estatus="por_aprobar")
 
-    # --- Resumen ----------------------------------------------------------
     total_monto = sum(float(c["monto"]) for c in pendientes)
     m1, m2, m3 = st.columns(3)
     m1.metric("Pendientes de aprobación", len(pendientes))
@@ -269,7 +381,6 @@ def panel_junta(usuario: str, nombre: str):
         "Al final, un solo botón las firma todas."
     )
 
-    # --- Tabla con casillas ----------------------------------------------
     df = pd.DataFrame(pendientes)
     df["Aprobar"] = False
 
@@ -277,14 +388,9 @@ def panel_junta(usuario: str, nombre: str):
         "Aprobar", "numero_odc", "fecha_cotizacion", "sede", "area",
         "proveedor", "descripcion", "monto", "pdf_original_url", "id",
     ]].rename(columns={
-        "numero_odc": "N° OdC",
-        "fecha_cotizacion": "Fecha",
-        "sede": "Sede",
-        "area": "Área",
-        "proveedor": "Proveedor",
-        "descripcion": "Descripción",
-        "monto": "Monto (USD)",
-        "pdf_original_url": "PDF",
+        "numero_odc": "N° OdC", "fecha_cotizacion": "Fecha", "sede": "Sede",
+        "area": "Área", "proveedor": "Proveedor", "descripcion": "Descripción",
+        "monto": "Monto (USD)", "pdf_original_url": "PDF",
     })
 
     editada = st.data_editor(
@@ -312,18 +418,13 @@ def panel_junta(usuario: str, nombre: str):
     ids = seleccionadas["id"].tolist()
     monto_sel = float(seleccionadas["Monto (USD)"].sum()) if ids else 0.0
 
-    st.markdown(
-        f"**Seleccionadas: {len(ids)}**  ·  Monto: **US$ {monto_sel:,.2f}**"
-    )
+    st.markdown(f"**Seleccionadas: {len(ids)}**  ·  Monto: **US$ {monto_sel:,.2f}**")
 
     c1, c2 = st.columns([1, 2])
-
     with c1:
         if st.button(
             f"✅ Firmar y aprobar ({len(ids)})",
-            type="primary",
-            disabled=not ids,
-            use_container_width=True,
+            type="primary", disabled=not ids, use_container_width=True,
         ):
             st.session_state["confirmar_aprobar"] = ids
             st.session_state["confirmar_monto"] = monto_sel
@@ -345,7 +446,6 @@ def panel_junta(usuario: str, nombre: str):
 
 
 def pantalla_confirmacion(registro, usuario):
-    """Pide confirmación antes de firmar en lote (acción difícil de deshacer)."""
     ids = st.session_state["confirmar_aprobar"]
     monto = st.session_state.get("confirmar_monto", 0.0)
 
@@ -358,23 +458,19 @@ def pantalla_confirmacion(registro, usuario):
     )
 
     c1, c2 = st.columns(2)
-
     with c1:
         if st.button("✅ Sí, firmar todas", type="primary", use_container_width=True):
             ok, errores = procesar_aprobacion(ids, registro, usuario)
             st.session_state.pop("confirmar_aprobar", None)
             st.session_state.pop("confirmar_monto", None)
-
             if ok:
                 st.success(f"✅ Firmadas y aprobadas: {', '.join(ok)}")
             for etiqueta, err in errores:
                 st.error(f"No se pudo firmar {etiqueta}.")
                 st.caption(f"Detalle técnico: {err}")
-
             if not errores:
                 st.balloons()
             st.button("Volver al panel")
-
     with c2:
         if st.button("Cancelar", use_container_width=True):
             st.session_state.pop("confirmar_aprobar", None)
@@ -383,7 +479,7 @@ def pantalla_confirmacion(registro, usuario):
 
 
 # ---------------------------------------------------------------------------
-# 6. Tabla general
+# 8. Tabla general
 # ---------------------------------------------------------------------------
 def tabla_cotizaciones(usuario: str, ver_todo: bool):
     st.subheader("📄 Todas las cotizaciones" if ver_todo else "📄 Mis cotizaciones")
@@ -401,22 +497,15 @@ def tabla_cotizaciones(usuario: str, ver_todo: bool):
     df["Estatus"] = df["estatus"].map(ds.ETIQUETA_ESTATUS).fillna(df["estatus"])
 
     columnas = {
-        "numero_odc": "N° OdC",
-        "fecha_cotizacion": "Fecha",
-        "sede": "Sede",
-        "area": "Área",
-        "proveedor": "Proveedor",
-        "monto": "Monto (USD)",
-        "Estatus": "Estatus",
-        "pdf_original_url": "PDF original",
+        "numero_odc": "N° OdC", "fecha_cotizacion": "Fecha", "sede": "Sede",
+        "area": "Área", "proveedor": "Proveedor", "monto": "Monto (USD)",
+        "Estatus": "Estatus", "pdf_original_url": "PDF original",
         "pdf_firmado_url": "PDF firmado",
     }
     vista = df[list(columnas.keys())].rename(columns=columnas)
 
     st.dataframe(
-        vista,
-        use_container_width=True,
-        hide_index=True,
+        vista, use_container_width=True, hide_index=True,
         column_config={
             "Monto (USD)": st.column_config.NumberColumn(format="$ %.2f"),
             "PDF original": st.column_config.LinkColumn(display_text="Abrir"),
@@ -427,7 +516,7 @@ def tabla_cotizaciones(usuario: str, ver_todo: bool):
 
 
 # ---------------------------------------------------------------------------
-# 7. Pantalla principal
+# 9. Pantalla principal
 # ---------------------------------------------------------------------------
 st.title("📋 Cotizaciones · Terminales de Cruceros")
 
@@ -452,6 +541,8 @@ elif estado:
         st.caption(f"Usuario: {usuario}")
         st.caption(f"Rol: {', '.join(roles) if roles else '—'}")
         authenticator.logout("Cerrar sesión", location="sidebar")
+        st.divider()
+        cambiar_mi_password(usuario)
 
     es_admin = "admin" in roles
     es_junta = "junta" in roles
@@ -461,8 +552,17 @@ elif estado:
         st.divider()
         tabla_cotizaciones(usuario, ver_todo=True)
     elif es_admin or "jefe" in roles:
-        panel_jefe(usuario)
-        st.divider()
-        tabla_cotizaciones(usuario, ver_todo=es_admin)
+        if es_admin:
+            pestañas = st.tabs(["📋 Cotizaciones", "👥 Usuarios"])
+            with pestañas[0]:
+                panel_jefe(usuario)
+                st.divider()
+                tabla_cotizaciones(usuario, ver_todo=True)
+            with pestañas[1]:
+                panel_usuarios()
+        else:
+            panel_jefe(usuario)
+            st.divider()
+            tabla_cotizaciones(usuario, ver_todo=False)
     else:
         st.warning("Tu usuario no tiene un rol asignado. Avisa al administrador.")
