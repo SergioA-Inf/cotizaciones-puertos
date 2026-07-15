@@ -1,4 +1,9 @@
 streamlit
 streamlit-authenticator>=0.4.0
+streamlit-drawable-canvas-fix
 supabase
 pandas
+numpy
+pillow
+pypdf
+reportlab
