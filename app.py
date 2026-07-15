@@ -1,12 +1,11 @@
 """
 App de Cotizaciones - Terminales de Cruceros (Panamá y Colón)
 =============================================================
-PASO 7: los usuarios ahora viven en Supabase.
+PASO 8: identidad visual (logos y paleta de marca).
 
-Novedades:
-  - Login contra la tabla `usuarios` (ya no contra los Secrets).
-  - Cada quien puede cambiar su propia contraseña.
-  - El administrador da de alta jefes desde la app, sin tocar código.
+Los colores salen de los propios logos:
+  azul  #14264F  (común a las dos marcas)
+  verde #61904C  (Port Colon 2000)
 """
 
 import io
@@ -22,7 +21,61 @@ from streamlit_drawable_canvas import st_canvas
 import data_store as ds
 import pdf_utils
 
-st.set_page_config(page_title="Cotizaciones Puertos", page_icon="📋", layout="wide")
+st.set_page_config(page_title="Cotizaciones · Terminales de Cruceros",
+                   page_icon="⚓", layout="wide")
+
+
+# ---------------------------------------------------------------------------
+# 0. Identidad visual
+# ---------------------------------------------------------------------------
+ESTILOS = """
+<style>
+  .titulo-app {
+    font-size: 1.55rem; font-weight: 700; color: #14264F;
+    margin: 0; text-align: center; line-height: 1.15;
+  }
+  .subtitulo-app {
+    font-size: .70rem; color: #5A6B87; letter-spacing: .16em;
+    text-transform: uppercase; text-align: center; margin-top: .3rem;
+  }
+  /* Línea de marca: azul (Panamá) -> verde (Colón) */
+  .regla-marca {
+    height: 3px; border: 0; border-radius: 2px; margin: .9rem 0 1.3rem 0;
+    background: linear-gradient(90deg, #14264F 0%, #2F5E6B 55%, #61904C 100%);
+  }
+  [data-testid="stMetric"] {
+    background: #F2F5F9; border: 1px solid #E3E9F2;
+    border-radius: 12px; padding: 14px 16px;
+  }
+  [data-testid="stMetricValue"] { color: #14264F; font-weight: 700; }
+</style>
+"""
+
+
+def encabezado():
+    """Encabezado con los logos de las dos terminales."""
+    st.markdown(ESTILOS, unsafe_allow_html=True)
+
+    c1, c2, c3 = st.columns([1, 2.6, 1], vertical_alignment="center")
+
+    with c1:
+        ruta = pdf_utils.resolver_logo("Panamá")
+        if ruta:
+            st.image(ruta, width=95)
+
+    with c2:
+        st.markdown(
+            '<div class="titulo-app">Cotizaciones</div>'
+            '<div class="subtitulo-app">Terminales de cruceros · Panamá y Colón</div>',
+            unsafe_allow_html=True,
+        )
+
+    with c3:
+        ruta = pdf_utils.resolver_logo("Colón")
+        if ruta:
+            st.image(ruta, width=185)
+
+    st.markdown('<hr class="regla-marca">', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +84,7 @@ st.set_page_config(page_title="Cotizaciones Puertos", page_icon="📋", layout="
 credenciales = ds.cargar_usuarios_para_login()
 
 if not credenciales["usernames"]:
+    encabezado()
     st.error(
         "No se pudieron cargar los usuarios desde la base de datos. "
         "Revisa la conexión con Supabase."
@@ -85,7 +139,7 @@ def panel_usuarios():
     st.subheader("👥 Usuarios del sistema")
 
     # expanded=True a propósito: si se cierra al enviar, los mensajes de
-    # error quedan escondidos adentro y el usuario cree que no pasó nada.
+    # error quedan escondidos adentro y parece que "no pasó nada".
     with st.expander("➕ Crear usuario nuevo", expanded=True):
         with st.form("form_usuario", clear_on_submit=True):
             c1, c2 = st.columns(2)
@@ -131,7 +185,6 @@ def panel_usuarios():
                     st.error("No se pudo crear el usuario.")
                     st.caption(f"Detalle técnico: {e}")
 
-    # --- Lista de usuarios -------------------------------------------------
     usuarios = ds.listar_usuarios()
     if not usuarios:
         st.info("No hay usuarios.")
@@ -147,7 +200,6 @@ def panel_usuarios():
     )
     st.dataframe(vista, hide_index=True, use_container_width=True)
 
-    # --- Activar / desactivar ---------------------------------------------
     st.markdown("##### Activar o desactivar acceso")
     st.caption(
         "Desactivar impide el ingreso, pero conserva el historial de la persona. "
@@ -523,7 +575,7 @@ def tabla_cotizaciones(usuario: str, ver_todo: bool):
 # ---------------------------------------------------------------------------
 # 9. Pantalla principal
 # ---------------------------------------------------------------------------
-st.title("📋 Cotizaciones · Terminales de Cruceros")
+encabezado()
 
 try:
     authenticator.login(location="main")
