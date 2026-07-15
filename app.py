@@ -84,12 +84,17 @@ def cambiar_mi_password(usuario: str):
 def panel_usuarios():
     st.subheader("👥 Usuarios del sistema")
 
-    with st.expander("➕ Crear usuario nuevo"):
+    # expanded=True a propósito: si se cierra al enviar, los mensajes de
+    # error quedan escondidos adentro y el usuario cree que no pasó nada.
+    with st.expander("➕ Crear usuario nuevo", expanded=True):
         with st.form("form_usuario", clear_on_submit=True):
             c1, c2 = st.columns(2)
             with c1:
                 nuevo_usuario = st.text_input(
-                    "Usuario *", placeholder="ej: jperez (sin espacios ni mayúsculas)"
+                    "Usuario *",
+                    placeholder="ej: joperaciones",
+                    help="Sin espacios, tildes ni ñ. Es solo para iniciar sesión; "
+                         "el nombre completo va en el campo Nombre.",
                 )
                 nombre = st.text_input("Nombre *")
                 apellido = st.text_input("Apellido")
