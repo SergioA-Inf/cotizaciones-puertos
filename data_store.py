@@ -3,11 +3,11 @@ data_store.py
 =============
 Capa de acceso a datos: todo lo que habla con Supabase vive aquí.
 
-Desde el Paso 7 los USUARIOS también viven en Supabase (antes estaban en
-los Secrets). Las contraseñas se guardan cifradas con bcrypt: ni el
-administrador puede leerlas.
+Paso 9: respaldos de ejecución (reportes y fotos) y rol administrativo.
 """
 
+import mimetypes
+import re
 import uuid
 from datetime import datetime, timezone
 
@@ -15,11 +15,12 @@ import bcrypt
 import streamlit as st
 from supabase import create_client, Client
 
-BUCKET = "cotizaciones"          # público: PDFs
+BUCKET = "cotizaciones"          # público: PDFs y respaldos
 BUCKET_FIRMAS = "firmas"         # privado: imágenes de firma
 TABLA = "cotizaciones"
 TABLA_FIRMAS = "firmas_usuarios"
 TABLA_USUARIOS = "usuarios"
+TABLA_RESPALDOS = "respaldos"
 
 # --- Listas fijas ---------------------------------------------------------
 SEDES = ["Panamá", "Colón"]
@@ -35,7 +36,11 @@ AREAS = [
     "Reservas",
 ]
 
-ROLES = ["jefe", "junta", "admin"]
+# jefe          -> sube cotizaciones y marca ejecutado
+# junta         -> aprueba y firma
+# administrativo-> ve lo firmado/ejecutado y baja archivos (solo lectura)
+# admin         -> todo, más la gestión de usuarios
+ROLES = ["jefe", "junta", "administrativo", "admin"]
 
 ETIQUETA_ESTATUS = {
     "por_aprobar": "🟡 Por aprobar",
@@ -72,15 +77,13 @@ def conectar():
 
 
 # ---------------------------------------------------------------------------
-# Contraseñas (cifrado)
+# Contraseñas
 # ---------------------------------------------------------------------------
 def cifrar_password(texto: str) -> str:
-    """Convierte una contraseña en su versión cifrada (irreversible)."""
     return bcrypt.hashpw(texto.encode(), bcrypt.gensalt()).decode()
 
 
 def password_correcta(texto: str, cifrada: str) -> bool:
-    """Comprueba si una contraseña coincide con su versión cifrada."""
     try:
         return bcrypt.checkpw(texto.encode(), cifrada.encode())
     except Exception:
@@ -91,10 +94,7 @@ def password_correcta(texto: str, cifrada: str) -> bool:
 # Usuarios
 # ---------------------------------------------------------------------------
 def cargar_usuarios_para_login() -> dict:
-    """
-    Arma el diccionario de credenciales que necesita streamlit-authenticator.
-    Solo incluye usuarios ACTIVOS.
-    """
+    """Credenciales para streamlit-authenticator. Solo usuarios ACTIVOS."""
     cliente = conectar()
     if cliente is None:
         return {"usernames": {}}
@@ -107,7 +107,7 @@ def cargar_usuarios_para_login() -> dict:
             "first_name": u.get("nombre", ""),
             "last_name": u.get("apellido", "") or "",
             "email": u.get("email", "") or "",
-            "password": u["password_hash"],   # ya viene cifrada
+            "password": u["password_hash"],
             "roles": list(u.get("roles") or []),
         }
     return credenciales
@@ -117,8 +117,7 @@ def listar_usuarios():
     cliente = conectar()
     if cliente is None:
         return []
-    r = cliente.table(TABLA_USUARIOS).select("*").order("usuario").execute()
-    return r.data or []
+    return cliente.table(TABLA_USUARIOS).select("*").order("usuario").execute().data or []
 
 
 def obtener_usuario(usuario: str):
@@ -130,11 +129,9 @@ def obtener_usuario(usuario: str):
 
 
 def crear_usuario(usuario, nombre, apellido, email, password, roles, sede=None):
-    """Da de alta un usuario nuevo con su contraseña ya cifrada."""
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
-
     cliente.table(TABLA_USUARIOS).insert({
         "usuario": usuario,
         "nombre": nombre,
@@ -151,10 +148,9 @@ def cambiar_password(usuario: str, nueva: str) -> None:
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
-
-    cliente.table(TABLA_USUARIOS).update({
-        "password_hash": cifrar_password(nueva)
-    }).eq("usuario", usuario).execute()
+    cliente.table(TABLA_USUARIOS).update(
+        {"password_hash": cifrar_password(nueva)}
+    ).eq("usuario", usuario).execute()
 
 
 def activar_usuario(usuario: str, activo: bool) -> None:
@@ -165,12 +161,17 @@ def activar_usuario(usuario: str, activo: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# PDFs
+# Archivos
 # ---------------------------------------------------------------------------
 def _ruta_desde_url(url: str) -> str:
     """.../public/cotizaciones/originales/abc.pdf -> originales/abc.pdf"""
-    limpia = url.split("?")[0]
-    return limpia.split(f"/{BUCKET}/", 1)[-1]
+    return url.split("?")[0].split(f"/{BUCKET}/", 1)[-1]
+
+
+def _nombre_seguro(nombre: str) -> str:
+    """Quita acentos, espacios y símbolos raros del nombre de archivo."""
+    limpio = re.sub(r"[^A-Za-z0-9._-]", "_", nombre)
+    return limpio[:80] or "archivo"
 
 
 def subir_pdf(archivo) -> str:
@@ -195,11 +196,62 @@ def subir_pdf_firmado(contenido: bytes, numero_odc: str) -> str:
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
-    nombre = f"firmados/{numero_odc}_{uuid.uuid4().hex[:8]}.pdf"
+    nombre = f"firmados/{_nombre_seguro(numero_odc)}_{uuid.uuid4().hex[:8]}.pdf"
     cliente.storage.from_(BUCKET).upload(
         nombre, contenido, {"content-type": "application/pdf"}
     )
     return cliente.storage.from_(BUCKET).get_public_url(nombre)
+
+
+# ---------------------------------------------------------------------------
+# Respaldos de ejecución (reportes, fotos)
+# ---------------------------------------------------------------------------
+def subir_respaldo(cotizacion_id: str, archivo, usuario: str) -> str:
+    """Sube un archivo de respaldo y lo registra contra su cotización."""
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+
+    limpio = _nombre_seguro(archivo.name)
+    ruta = f"respaldos/{cotizacion_id}/{uuid.uuid4().hex[:8]}_{limpio}"
+    tipo = (
+        getattr(archivo, "type", None)
+        or mimetypes.guess_type(archivo.name)[0]
+        or "application/octet-stream"
+    )
+
+    cliente.storage.from_(BUCKET).upload(ruta, archivo.getvalue(), {"content-type": tipo})
+    url = cliente.storage.from_(BUCKET).get_public_url(ruta)
+
+    cliente.table(TABLA_RESPALDOS).insert({
+        "cotizacion_id": cotizacion_id,
+        "nombre_archivo": archivo.name,
+        "url": url,
+        "subido_por": usuario,
+    }).execute()
+    return url
+
+
+def listar_respaldos(cotizacion_id: str):
+    cliente = conectar()
+    if cliente is None:
+        return []
+    r = (cliente.table(TABLA_RESPALDOS).select("*")
+         .eq("cotizacion_id", cotizacion_id)
+         .order("fecha_subida").execute())
+    return r.data or []
+
+
+def contar_respaldos() -> dict:
+    """{cotizacion_id: cuántos respaldos tiene}. Una sola consulta."""
+    cliente = conectar()
+    if cliente is None:
+        return {}
+    r = cliente.table(TABLA_RESPALDOS).select("cotizacion_id").execute()
+    cuentas = {}
+    for fila in (r.data or []):
+        cuentas[fila["cotizacion_id"]] = cuentas.get(fila["cotizacion_id"], 0) + 1
+    return cuentas
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +261,6 @@ def guardar_firma(usuario: str, nombre_completo: str, imagen: bytes) -> None:
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
-
     ruta = f"{usuario}.png"
     cliente.storage.from_(BUCKET_FIRMAS).upload(
         ruta, imagen, {"content-type": "image/png", "upsert": "true"}
@@ -248,7 +299,12 @@ def crear_cotizacion(datos: dict) -> dict:
     return r.data[0] if r.data else {}
 
 
-def listar_cotizaciones(sede=None, subido_por=None, estatus=None):
+def listar_cotizaciones(sede=None, subido_por=None, estatus=None, estatus_en=None):
+    """
+    Trae cotizaciones con filtros opcionales.
+      estatus     -> un estatus exacto
+      estatus_en  -> lista de estatus (ej. las firmadas y ejecutadas)
+    """
     cliente = conectar()
     if cliente is None:
         return []
@@ -260,9 +316,10 @@ def listar_cotizaciones(sede=None, subido_por=None, estatus=None):
         consulta = consulta.eq("subido_por", subido_por)
     if estatus:
         consulta = consulta.eq("estatus", estatus)
+    if estatus_en:
+        consulta = consulta.in_("estatus", estatus_en)
 
-    r = consulta.order("fecha_subida", desc=True).execute()
-    return r.data or []
+    return consulta.order("fecha_subida", desc=True).execute().data or []
 
 
 def obtener_cotizacion(id_cot: str):
@@ -277,8 +334,7 @@ def numero_odc_existe(numero: str) -> bool:
     cliente = conectar()
     if cliente is None or not numero:
         return False
-    r = cliente.table(TABLA).select("id").eq("numero_odc", numero).execute()
-    return bool(r.data)
+    return bool(cliente.table(TABLA).select("id").eq("numero_odc", numero).execute().data)
 
 
 def aprobar_cotizacion(id_cot: str, usuario: str, url_firmado: str) -> None:
@@ -302,6 +358,19 @@ def rechazar_cotizacion(id_cot: str, usuario: str, motivo: str) -> None:
         "aprobado_por": usuario,
         "fecha_aprobacion": ahora_iso(),
         "motivo_rechazo": motivo,
+    }).eq("id", id_cot).execute()
+
+
+def marcar_ejecutado(id_cot: str, usuario: str, nota: str = None) -> None:
+    """Cierra el ciclo: el trabajo se realizó."""
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+    cliente.table(TABLA).update({
+        "estatus": "ejecutado",
+        "ejecutado_por": usuario,
+        "fecha_ejecucion": ahora_iso(),
+        "nota_ejecucion": nota or None,
     }).eq("id", id_cot).execute()
 
 
