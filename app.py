@@ -96,7 +96,7 @@ authenticator = stauth.Authenticate(
 # ---------------------------------------------------------------------------
 # 2. Filtros y tabla (se reutilizan en varios paneles)
 # ---------------------------------------------------------------------------
-def aplicar_filtros(filas, clave: str, estatus_posibles):
+def aplicar_filtros(filas, clave: str, estatus_posibles, sedes=None):
     """Dibuja el panel de filtros y devuelve las filas ya filtradas."""
     if not filas:
         return pd.DataFrame()
@@ -105,7 +105,7 @@ def aplicar_filtros(filas, clave: str, estatus_posibles):
 
     with st.expander("🔎 Filtros", expanded=False):
         c1, c2, c3 = st.columns(3)
-        f_sede = c1.multiselect("Sede", ds.SEDES, key=f"fsede_{clave}")
+        f_sede = c1.multiselect("Sede", sedes or ds.SEDES, key=f"fsede_{clave}")
         f_area = c2.multiselect("Área", ds.AREAS, key=f"farea_{clave}")
         f_estatus = c3.multiselect(
             "Estatus",
@@ -262,7 +262,10 @@ def panel_usuarios(usuario_actual: str):
             with c2:
                 email = st.text_input("Correo")
                 rol = st.selectbox("Rol *", ds.ROLES, index=0)
-                sede = st.selectbox("Sede (informativo)", ["—"] + ds.SEDES)
+                sedes_nuevo = st.multiselect(
+                    "Sedes *", ds.SEDES, default=ds.SEDES,
+                    help="A qué terminales tiene acceso. Puede ser una o las dos.",
+                )
 
             password = st.text_input(
                 "Contraseña temporal *",
@@ -276,6 +279,8 @@ def panel_usuarios(usuario_actual: str):
                 st.error("Usuario, nombre y contraseña temporal son obligatorios.")
             elif " " in u:
                 st.error("El usuario no puede llevar espacios.")
+            elif not sedes_nuevo:
+                st.error("Debes asignar al menos una sede.")
             elif len(password) < 8:
                 st.error("La contraseña temporal debe tener al menos 8 caracteres.")
             elif ds.obtener_usuario(u):
@@ -284,9 +289,12 @@ def panel_usuarios(usuario_actual: str):
                 try:
                     ds.crear_usuario(
                         u, nombre.strip(), apellido.strip(), email.strip(),
-                        password, [rol], None if sede == "—" else sede,
+                        password, [rol], sedes_nuevo,
                     )
-                    st.success(f"✅ Usuario «{u}» creado con rol {rol}.")
+                    st.success(
+                        f"✅ Usuario «{u}» creado con rol {rol} · "
+                        f"{', '.join(sedes_nuevo)}."
+                    )
                     st.rerun()
                 except Exception as e:
                     st.error("No se pudo crear el usuario.")
@@ -299,11 +307,35 @@ def panel_usuarios(usuario_actual: str):
 
     df = pd.DataFrame(usuarios)
     df["Rol"] = df["roles"].apply(lambda r: ", ".join(r or []))
-    vista = df[["usuario", "nombre", "apellido", "email", "Rol", "sede", "activo"]].rename(
+    df["Sedes"] = df["sedes"].apply(lambda s: ", ".join(s or []))
+    vista = df[["usuario", "nombre", "apellido", "email", "Rol", "Sedes", "activo"]].rename(
         columns={"usuario": "Usuario", "nombre": "Nombre", "apellido": "Apellido",
-                 "email": "Correo", "sede": "Sede", "activo": "Activo"}
+                 "email": "Correo", "activo": "Activo"}
     )
     st.dataframe(vista, hide_index=True, use_container_width=True)
+
+    # --- Cambiar sedes -----------------------------------------------------
+    with st.expander("🏢 Cambiar las sedes de un usuario"):
+        quien = st.selectbox(
+            "Usuario", [u["usuario"] for u in usuarios], key="sel_sedes"
+        )
+        actuales = next(u for u in usuarios if u["usuario"] == quien).get("sedes") or []
+        nuevas = st.multiselect(
+            "Sedes", ds.SEDES,
+            default=[s for s in ds.SEDES if s in actuales],
+            key="ms_sedes",
+        )
+        if st.button("Guardar sedes", key="btn_sedes"):
+            if not nuevas:
+                st.error("Debe tener al menos una sede.")
+            else:
+                try:
+                    ds.actualizar_sedes(quien, nuevas)
+                    st.success(f"«{quien}» ahora tiene acceso a: {', '.join(nuevas)}.")
+                    st.rerun()
+                except Exception as e:
+                    st.error("No se pudieron guardar las sedes.")
+                    st.caption(f"Detalle técnico: {e}")
 
     st.markdown("##### Activar o desactivar acceso")
     st.caption(
@@ -374,14 +406,18 @@ def panel_usuarios(usuario_actual: str):
 # ---------------------------------------------------------------------------
 # 5. Nueva cotización
 # ---------------------------------------------------------------------------
-def formulario_cotizacion(usuario: str):
+def formulario_cotizacion(usuario: str, sedes):
     st.subheader("➕ Nueva cotización")
+
+    if not sedes:
+        st.warning("Tu usuario no tiene ninguna sede asignada. Avisa al administrador.")
+        return
 
     with st.form("form_cotizacion", clear_on_submit=True):
         col1, col2 = st.columns(2)
         with col1:
             numero_odc = st.text_input("N° de OdC *", placeholder="Ej: RB-0069")
-            sede = st.selectbox("Sede *", ds.SEDES)
+            sede = st.selectbox("Sede *", sedes)
             area = st.selectbox("Área *", ds.AREAS)
             fecha_cotizacion = st.date_input("Fecha de la cotización *", value=date.today())
         with col2:
@@ -442,11 +478,13 @@ def formulario_cotizacion(usuario: str):
 # ---------------------------------------------------------------------------
 # 6. Marcar ejecutado + respaldos
 # ---------------------------------------------------------------------------
-def panel_ejecutar(usuario: str, ver_todo: bool):
+def panel_ejecutar(usuario: str, ver_todo: bool, sedes):
     st.subheader("🔧 Registrar trabajo ejecutado")
 
     firmadas = ds.listar_cotizaciones(
-        subido_por=None if ver_todo else usuario, estatus="aprobado_firmado"
+        subido_por=None if ver_todo else usuario,
+        estatus="aprobado_firmado",
+        sedes_en=sedes,
     )
 
     if not firmadas:
@@ -618,7 +656,7 @@ def procesar_rechazo(ids, usuario, motivo):
 # ---------------------------------------------------------------------------
 # 9. Junta: pendientes
 # ---------------------------------------------------------------------------
-def panel_junta(usuario: str, nombre: str):
+def panel_junta(usuario: str, nombre: str, sedes):
     registro = ds.obtener_registro_firma(usuario)
     registrar_firma(usuario, nombre, ya_tiene=registro is not None)
 
@@ -626,14 +664,28 @@ def panel_junta(usuario: str, nombre: str):
         st.info("Registra tu firma arriba para habilitar la aprobación.")
         return
 
+    if not sedes:
+        st.warning("Tu usuario no tiene ninguna sede asignada. Avisa al administrador.")
+        return
+
     if st.session_state.get("confirmar_aprobar"):
         pantalla_confirmacion(registro, usuario)
         return
 
-    sede_filtro = st.radio("Sede", ["Todas"] + ds.SEDES, horizontal=True, key="sede_junta")
-    sede = None if sede_filtro == "Todas" else sede_filtro
+    # Si solo aprueba una sede, no tiene sentido ofrecerle un filtro
+    if len(sedes) == 1:
+        sede_filtro = sedes[0]
+        st.caption(f"Apruebas cotizaciones de: **{sede_filtro}**")
+    else:
+        sede_filtro = st.radio(
+            "Sede", ["Todas"] + sedes, horizontal=True, key="sede_junta"
+        )
 
-    pendientes = ds.listar_cotizaciones(sede=sede, estatus="por_aprobar")
+    if sede_filtro == "Todas":
+        pendientes = ds.listar_cotizaciones(sedes_en=sedes, estatus="por_aprobar")
+    else:
+        pendientes = ds.listar_cotizaciones(sede=sede_filtro, estatus="por_aprobar")
+
     total_monto = sum(float(c["monto"]) for c in pendientes)
 
     m1, m2, m3 = st.columns(3)
@@ -743,16 +795,16 @@ def pantalla_confirmacion(registro, usuario):
 # ---------------------------------------------------------------------------
 # 10. Historial (consulta con filtros)
 # ---------------------------------------------------------------------------
-def panel_historial(usuario=None, clave="hist"):
+def panel_historial(usuario=None, clave="hist", sedes=None):
     st.subheader("🗂️ Historial")
     st.caption("Todo lo que ya pasó por el sistema. Usa los filtros para encontrar algo puntual.")
 
-    filas = ds.listar_cotizaciones(subido_por=usuario)
+    filas = ds.listar_cotizaciones(subido_por=usuario, sedes_en=sedes)
     if not filas:
         st.info("Todavía no hay cotizaciones registradas.")
         return
 
-    df = aplicar_filtros(filas, clave, list(ds.ETIQUETA_ESTATUS.keys()))
+    df = aplicar_filtros(filas, clave, list(ds.ETIQUETA_ESTATUS.keys()), sedes)
     mostrar_tabla(df, respaldos=ds.contar_respaldos())
     if not df.empty:
         ver_respaldos(df)
@@ -817,14 +869,16 @@ def panel_regenerar():
 # ---------------------------------------------------------------------------
 # 11. Panel administrativo (solo lectura)
 # ---------------------------------------------------------------------------
-def panel_administrativo():
+def panel_administrativo(sedes):
     st.subheader("💳 Órdenes firmadas")
     st.caption(
         "Órdenes aprobadas por la Junta. Descarga el **Expediente** para tener en un "
         "solo PDF la cotización, el acta firmada y los respaldos del trabajo."
     )
 
-    filas = ds.listar_cotizaciones(estatus_en=["aprobado_firmado", "ejecutado"])
+    filas = ds.listar_cotizaciones(
+        estatus_en=["aprobado_firmado", "ejecutado"], sedes_en=sedes
+    )
     if not filas:
         st.info("Todavía no hay órdenes firmadas.")
         return
@@ -840,7 +894,7 @@ def panel_administrativo():
         f"US$ {sum(float(f['monto']) for f in ejecutadas):,.2f}",
     )
 
-    df = aplicar_filtros(filas, "admvo", ["aprobado_firmado", "ejecutado"])
+    df = aplicar_filtros(filas, "admvo", ["aprobado_firmado", "ejecutado"], sedes)
     mostrar_tabla(df, respaldos=ds.contar_respaldos())
     if not df.empty:
         ver_respaldos(df)
@@ -880,39 +934,45 @@ elif estado:
     es_administrativo = "administrativo" in roles
     es_jefe = "jefe" in roles
 
+    # Sedes que esta persona puede ver y tocar. El admin ve las dos.
+    sedes = ds.sedes_de_usuario(usuario, roles)
+
+    with st.sidebar:
+        st.caption(f"Sedes: {', '.join(sedes) if sedes else '—'}")
+
     if es_junta:
         t1, t2 = st.tabs(["🟡 Pendientes", "🗂️ Historial"])
         with t1:
-            panel_junta(usuario, nombre)
+            panel_junta(usuario, nombre, sedes)
         with t2:
-            panel_historial(clave="junta")
+            panel_historial(clave="junta", sedes=sedes)
 
     elif es_admin:
         t1, t2, t3, t4 = st.tabs(
             ["➕ Nueva", "🔧 Ejecutar", "🗂️ Historial", "👥 Usuarios"]
         )
         with t1:
-            formulario_cotizacion(usuario)
+            formulario_cotizacion(usuario, sedes)
         with t2:
-            panel_ejecutar(usuario, ver_todo=True)
+            panel_ejecutar(usuario, ver_todo=True, sedes=sedes)
         with t3:
-            panel_historial(clave="admin")
+            panel_historial(clave="admin", sedes=sedes)
             st.divider()
             panel_regenerar()
         with t4:
             panel_usuarios(usuario)
 
     elif es_administrativo:
-        panel_administrativo()
+        panel_administrativo(sedes)
 
     elif es_jefe:
         t1, t2, t3 = st.tabs(["➕ Nueva", "🔧 Ejecutar", "🗂️ Mis cotizaciones"])
         with t1:
-            formulario_cotizacion(usuario)
+            formulario_cotizacion(usuario, sedes)
         with t2:
-            panel_ejecutar(usuario, ver_todo=False)
+            panel_ejecutar(usuario, ver_todo=False, sedes=sedes)
         with t3:
-            panel_historial(usuario=usuario, clave="jefe")
+            panel_historial(usuario=usuario, clave="jefe", sedes=sedes)
 
     else:
         st.warning("Tu usuario no tiene un rol asignado. Avisa al administrador.")

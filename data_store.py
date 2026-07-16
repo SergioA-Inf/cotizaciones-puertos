@@ -128,7 +128,7 @@ def obtener_usuario(usuario: str):
     return r.data[0] if r.data else None
 
 
-def crear_usuario(usuario, nombre, apellido, email, password, roles, sede=None):
+def crear_usuario(usuario, nombre, apellido, email, password, roles, sedes=None):
     cliente = conectar()
     if cliente is None:
         raise RuntimeError("Sin conexión a Supabase.")
@@ -139,9 +139,32 @@ def crear_usuario(usuario, nombre, apellido, email, password, roles, sede=None):
         "email": email or None,
         "password_hash": cifrar_password(password),
         "roles": roles,
-        "sede": sede,
+        "sedes": sedes or list(SEDES),
         "activo": True,
     }).execute()
+
+
+def actualizar_sedes(usuario: str, sedes) -> None:
+    """Cambia a qué sedes tiene acceso una persona."""
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+    cliente.table(TABLA_USUARIOS).update({"sedes": sedes}).eq("usuario", usuario).execute()
+
+
+def sedes_de_usuario(usuario: str, roles) -> list:
+    """
+    Sedes a las que esta persona tiene acceso.
+
+    El admin ve siempre las dos. Los demás, solo las suyas: eso decide qué
+    cotizaciones ven y cuáles pueden firmar.
+    """
+    if "admin" in (roles or []):
+        return list(SEDES)
+
+    registro = obtener_usuario(usuario)
+    suyas = (registro or {}).get("sedes") or []
+    return [s for s in SEDES if s in suyas]   # en el orden de siempre
 
 
 def cambiar_password(usuario: str, nueva: str) -> None:
@@ -371,11 +394,14 @@ def crear_cotizacion(datos: dict) -> dict:
     return r.data[0] if r.data else {}
 
 
-def listar_cotizaciones(sede=None, subido_por=None, estatus=None, estatus_en=None):
+def listar_cotizaciones(sede=None, subido_por=None, estatus=None,
+                        estatus_en=None, sedes_en=None):
     """
     Trae cotizaciones con filtros opcionales.
+      sede        -> una sede exacta
+      sedes_en    -> lista de sedes (las que el usuario tiene permitidas)
       estatus     -> un estatus exacto
-      estatus_en  -> lista de estatus (ej. las firmadas y ejecutadas)
+      estatus_en  -> lista de estatus
     """
     cliente = conectar()
     if cliente is None:
@@ -384,6 +410,10 @@ def listar_cotizaciones(sede=None, subido_por=None, estatus=None, estatus_en=Non
     consulta = cliente.table(TABLA).select("*")
     if sede:
         consulta = consulta.eq("sede", sede)
+    if sedes_en is not None:
+        if not sedes_en:          # sin sedes asignadas: no ve nada
+            return []
+        consulta = consulta.in_("sede", sedes_en)
     if subido_por:
         consulta = consulta.eq("subido_por", subido_por)
     if estatus:
