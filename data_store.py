@@ -160,6 +160,54 @@ def activar_usuario(usuario: str, activo: bool) -> None:
     cliente.table(TABLA_USUARIOS).update({"activo": activo}).eq("usuario", usuario).execute()
 
 
+def usuario_tiene_historial(usuario: str) -> bool:
+    """
+    ¿Esta persona ya dejó rastro en el sistema?
+
+    Si subió, aprobó o ejecutó algo, NO se debe borrar: el historial
+    quedaría apuntando a un usuario inexistente. En ese caso se desactiva.
+    """
+    cliente = conectar()
+    if cliente is None:
+        return True   # ante la duda, proteger
+
+    for campo in ("subido_por", "aprobado_por", "ejecutado_por"):
+        r = cliente.table(TABLA).select("id").eq(campo, usuario).limit(1).execute()
+        if r.data:
+            return True
+
+    r = cliente.table(TABLA_RESPALDOS).select("id").eq("subido_por", usuario).limit(1).execute()
+    return bool(r.data)
+
+
+def contar_admins_activos() -> int:
+    cliente = conectar()
+    if cliente is None:
+        return 0
+    r = cliente.table(TABLA_USUARIOS).select("usuario, roles").eq("activo", True).execute()
+    return sum(1 for u in (r.data or []) if "admin" in (u.get("roles") or []))
+
+
+def eliminar_usuario(usuario: str) -> None:
+    """
+    Borra un usuario que nunca actuó. Se lleva también su firma, si tenía.
+    Quien llama debe validar antes con usuario_tiene_historial().
+    """
+    cliente = conectar()
+    if cliente is None:
+        raise RuntimeError("Sin conexión a Supabase.")
+
+    registro = obtener_registro_firma(usuario)
+    if registro:
+        try:
+            cliente.storage.from_(BUCKET_FIRMAS).remove([registro["ruta_firma"]])
+        except Exception:
+            pass   # si el archivo ya no está, seguimos igual
+        cliente.table(TABLA_FIRMAS).delete().eq("usuario", usuario).execute()
+
+    cliente.table(TABLA_USUARIOS).delete().eq("usuario", usuario).execute()
+
+
 # ---------------------------------------------------------------------------
 # Archivos
 # ---------------------------------------------------------------------------

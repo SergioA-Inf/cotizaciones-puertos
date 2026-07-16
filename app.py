@@ -242,7 +242,7 @@ def cambiar_mi_password(usuario: str):
 # ---------------------------------------------------------------------------
 # 4. Usuarios (solo admin)
 # ---------------------------------------------------------------------------
-def panel_usuarios():
+def panel_usuarios(usuario_actual: str):
     st.subheader("👥 Usuarios del sistema")
 
     # expanded=True a propósito: si se cierra al enviar, los mensajes de
@@ -325,6 +325,50 @@ def panel_usuarios():
             except Exception as e:
                 st.error("No se pudo cambiar el estado.")
                 st.caption(f"Detalle técnico: {e}")
+
+    # --- Eliminar (solo usuarios que nunca actuaron) -----------------------
+    with st.expander("🗑️ Eliminar un usuario"):
+        st.caption(
+            "Solo se puede borrar a quien nunca subió, aprobó ni ejecutó nada "
+            "(por ejemplo, un usuario de prueba). Si ya actuó, su rastro debe "
+            "conservarse: usa Desactivar."
+        )
+
+        borrar = st.selectbox(
+            "Usuario a eliminar",
+            [u["usuario"] for u in usuarios],
+            key="sel_borrar",
+        )
+
+        es_admin_objetivo = "admin" in (
+            next(u for u in usuarios if u["usuario"] == borrar).get("roles") or []
+        )
+
+        # Tres candados
+        if borrar == usuario_actual:
+            st.warning("No puedes eliminar tu propio usuario.")
+        elif es_admin_objetivo and ds.contar_admins_activos() <= 1:
+            st.warning("Es el único administrador activo. Si lo borras, nadie podrá "
+                       "gestionar usuarios.")
+        elif ds.usuario_tiene_historial(borrar):
+            st.info(
+                f"«{borrar}» ya tiene actividad registrada, así que no se puede "
+                f"eliminar. Desactívalo con el control de arriba: pierde el acceso "
+                f"y su historial queda intacto."
+            )
+        else:
+            confirmo = st.checkbox(
+                f"Entiendo que eliminar «{borrar}» no se puede deshacer.",
+                key="chk_borrar",
+            )
+            if st.button("Eliminar usuario", disabled=not confirmo):
+                try:
+                    ds.eliminar_usuario(borrar)
+                    st.success(f"Usuario «{borrar}» eliminado.")
+                    st.rerun()
+                except Exception as e:
+                    st.error("No se pudo eliminar el usuario.")
+                    st.caption(f"Detalle técnico: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +758,62 @@ def panel_historial(usuario=None, clave="hist"):
         ver_respaldos(df)
 
 
+def panel_regenerar():
+    """
+    Rehace el expediente de una orden.
+
+    Sirve para: rescatar órdenes que se cerraron antes de que existiera el
+    expediente, y rehacerlo si algo falló al generarlo la primera vez.
+    """
+    st.markdown("##### 🧩 Regenerar expediente")
+    st.caption(
+        "Vuelve a armar el PDF completo (cotización + acta firmada + respaldos) "
+        "de una orden ya firmada."
+    )
+
+    candidatas = [
+        c for c in ds.listar_cotizaciones(estatus_en=["aprobado_firmado", "ejecutado"])
+        if c.get("pdf_firmado_url")
+    ]
+    if not candidatas:
+        st.caption("No hay órdenes firmadas todavía.")
+        return
+
+    def etiqueta(c):
+        falta = "" if c.get("pdf_expediente_url") else "  ·  ⚠️ sin expediente"
+        return f"{c['numero_odc']} · {c['proveedor']} · {ds.ETIQUETA_ESTATUS[c['estatus']]}{falta}"
+
+    opciones = {etiqueta(c): c for c in candidatas}
+    elegida = st.selectbox("Orden", list(opciones.keys()), key="sel_regen")
+    cot = opciones[elegida]
+
+    if st.button("Regenerar expediente", key="btn_regen"):
+        try:
+            with st.spinner("Armando el expediente..."):
+                firmado = ds.descargar_archivo(cot["pdf_firmado_url"])
+
+                archivos = []
+                for r in ds.listar_respaldos(cot["id"]):
+                    archivos.append({
+                        "nombre": r["nombre_archivo"],
+                        "contenido": ds.descargar_archivo(r["url"]),
+                    })
+
+                expediente = pdf_utils.generar_expediente(firmado, cot, archivos)
+                url = ds.subir_expediente(expediente, cot["numero_odc"])
+                ds.guardar_expediente(cot["id"], url)
+
+            st.success(
+                f"✅ Expediente de {cot['numero_odc']} regenerado"
+                + (f" con {len(archivos)} respaldo(s)." if archivos else
+                   " (esta orden no tiene respaldos adjuntos).")
+            )
+            st.rerun()
+        except Exception as e:
+            st.error("No se pudo regenerar el expediente.")
+            st.caption(f"Detalle técnico: {e}")
+
+
 # ---------------------------------------------------------------------------
 # 11. Panel administrativo (solo lectura)
 # ---------------------------------------------------------------------------
@@ -797,8 +897,10 @@ elif estado:
             panel_ejecutar(usuario, ver_todo=True)
         with t3:
             panel_historial(clave="admin")
+            st.divider()
+            panel_regenerar()
         with t4:
-            panel_usuarios()
+            panel_usuarios(usuario)
 
     elif es_administrativo:
         panel_administrativo()
