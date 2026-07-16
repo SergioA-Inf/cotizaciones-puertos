@@ -469,7 +469,7 @@ def formulario_cotizacion(usuario: str, sedes):
                 "subido_por": usuario,
             })
         st.success(f"✅ Cotización {numero_odc.strip()} enviada a la Junta.")
-        st.balloons()
+        st.toast("Cotización enviada", icon="✅")
     except Exception as e:
         st.error("No se pudo guardar la cotización.")
         st.caption(f"Detalle técnico: {e}")
@@ -783,7 +783,9 @@ def pantalla_confirmacion(registro, usuario):
                 st.error(f"No se pudo firmar {etiqueta}.")
                 st.caption(f"Detalle técnico: {err}")
             if not errores:
-                st.balloons()
+                st.toast(
+                    f"{len(ok)} cotización(es) firmada(s)", icon="✅"
+                )
             st.button("Volver al panel")
     with c2:
         if st.button("Cancelar", use_container_width=True):
